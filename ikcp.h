@@ -262,24 +262,49 @@ typedef struct IQUEUEHEAD iqueue_head;
 
 
 //=====================================================================
-// SEGMENT
+// SEGMENT kcp分段结构体
 //=====================================================================
+
+/* 数据fragment结构
+0               4   5   6       8 (BYTE)
++---------------+---+---+-------+
+|     conv      |cmd|frg|  wnd  |
++---------------+---+---+-------+   8
+|     ts        |     sn        |
++---------------+---------------+  16
+|     una       |     len       |
++---------------+---------------+  24
+|                               |
+|        DATA (optional)        |
+|                               |
++-------------------------------+
+
+conv 4 字节: 连接标识, 前面已经讨论过了.
+cmd 1 字节: Command.
+frg 1 字节: 分片数量. 表示随后还有多少个报文属于同一个包.
+wnd 2 字节: 发送方剩余接收窗口的大小.
+ts 4 字节: 时间戳.
+sn 4 字节: 报文编号.
+una 4 字节: 发送方的接收缓冲区中最小还未收到的报文段的编号. 也就是说, 编号比它小的报文段都已全部接收.
+len 4 字节: 数据段长度.
+data: 数据段. 只有数据报文会有这个字段.
+*/
 struct IKCPSEG
 {
-	struct IQUEUEHEAD node;
-	IUINT32 conv;
-	IUINT32 cmd;
-	IUINT32 frg;
-	IUINT32 wnd;
-	IUINT32 ts;
-	IUINT32 sn;
-	IUINT32 una;
-	IUINT32 len;
-	IUINT32 resendts;
-	IUINT32 rto;
-	IUINT32 fastack;
-	IUINT32 xmit;
-	char data[1];
+	struct IQUEUEHEAD node; // 双向链表定义的队列 用于发送和接受队列的缓冲
+	IUINT32 conv;			// conversation ，会话序列号：接收到的数据包与发送的一致才接收此数据包
+	IUINT32 cmd;			// command，指令类型：代表这个segment的类型
+	IUINT32 frg;			// 分片编号，表示倒数第几个分片。
+	IUINT32 wnd;			// 本地窗口大小，给接收端做流控的
+	IUINT32 ts;				// 当前时间戳
+	IUINT32 sn;				// 分配sn序列号
+	IUINT32 una;			// 累计确认数据编号，发送端期望收到的数据包，代表编号前面的所有报都收到了的标志
+	IUINT32 len;			// 数据长度
+	IUINT32 resendts;		// 重传时间戳，超过这个时间重发这个包
+	IUINT32 rto;			// 该报文的 RTO
+	IUINT32 fastack;		// ACK 失序次数. 也就是 KCP Readme 中所说的 “跳过” 次数.
+	IUINT32 xmit;			// 已经发送的次数
+	char data[1];			// 数据段
 };
 
 
@@ -288,9 +313,16 @@ struct IKCPSEG
 //---------------------------------------------------------------------
 struct IKCPCB
 {
-	IUINT32 conv, mtu, mss, state;
-	IUINT32 snd_una, snd_nxt, rcv_nxt;
-	IUINT32 ts_recent, ts_lastack, ssthresh;
+	IUINT32 conv; 		// 会话id
+	IUINT32 mtu;  		// 最大传输单元
+	IUINT32 mss;  		// 最大分片大小 
+	IUINT32 state; 		// 连接状态(0xFFFFFFFF表示断开连接)
+	IUINT32 snd_una;	// 第一个未确认的包
+	IUINT32 snd_nxt;	// 待发送包的序号 
+	IUINT32 rcv_nxt;	// 待接受包的序号，待接收消息尾序号(rcv_nxt+rcv_wnd)
+	IUINT32 ts_recent;	// 
+	IUINT32 ts_lastack;	//
+	IUINT32 ssthresh;	// 拥堵窗口的阈值，用来控制增长速度
 	IINT32 rx_rttval, rx_srtt, rx_rto, rx_minrto;
 	IUINT32 snd_wnd, rcv_wnd, rmt_wnd, cwnd, probe;
 	IUINT32 current, interval, ts_flush, xmit;
@@ -299,11 +331,11 @@ struct IKCPCB
 	IUINT32 nodelay, updated;
 	IUINT32 ts_probe, probe_wait;
 	IUINT32 dead_link, incr;
-	struct IQUEUEHEAD snd_queue;
-	struct IQUEUEHEAD rcv_queue;
-	struct IQUEUEHEAD snd_buf;
-	struct IQUEUEHEAD rcv_buf;
-	IUINT32 *acklist;
+	struct IQUEUEHEAD snd_queue;	// 发送消息队列
+	struct IQUEUEHEAD rcv_queue;	// 接收消息队列
+	struct IQUEUEHEAD snd_buf;		// 发送消息缓存数据
+	struct IQUEUEHEAD rcv_buf;		// 接受消息缓存数据
+	IUINT32 *acklist;	// 待发送的ack列表
 	IUINT32 ackcount;
 	IUINT32 ackblock;
 	void *user;
@@ -316,7 +348,7 @@ struct IKCPCB
 	void (*writelog)(const char *log, struct IKCPCB *kcp, void *user);
 };
 
-
+// 一个 ikcpcb 实例代表一个 KCP 连接
 typedef struct IKCPCB ikcpcb;
 
 #define IKCP_LOG_OUTPUT			1
@@ -343,25 +375,31 @@ extern "C" {
 // create a new kcp control object, 'conv' must equal in two endpoint
 // from the same connection. 'user' will be passed to the output callback
 // output callback can be setup like this: 'kcp->output = my_udp_output'
-ikcpcb* ikcp_create(IUINT32 conv, void *user);
 
+// ikcp_create 创建一个 KCP 实例. 传入的 conv 参数标识这个 KCP 连接, 
+// 也就是说, 这个连接发出去的每个报文段都会带上 conv, 它也只会接收 conv 与之相等的报文段. 
+// 通信的双方必须先协商一对相同的 conv. KCP 本身不提供任何握手机制, 协商 conv 交给使用者自行实现, 
+// 比如说通过已有的 TCP 连接协商.
+ikcpcb* ikcp_create(IUINT32 conv, void *user);
 // release kcp control object
-void ikcp_release(ikcpcb *kcp);
+void ikcp_release(ikcpcb *kcp); // 释放一个 KCP 实例
 
 // set output callback, which will be invoked by kcp
 void ikcp_setoutput(ikcpcb *kcp, int (*output)(const char *buf, int len, 
-	ikcpcb *kcp, void *user));
+	ikcpcb *kcp, void *user)); // 设置下层协议输出回调函数
 
 // user/upper level recv: returns size, returns below zero for EAGAIN
+// ikcp_recv 从接收队列中读取数据;
 int ikcp_recv(ikcpcb *kcp, char *buffer, int len);
 
 // user/upper level send, returns below zero for error
+// ikcp_send 将数据放在发送队列中等待发送;
 int ikcp_send(ikcpcb *kcp, const char *buffer, int len);
 
 // update state (call it repeatedly, every 10ms-100ms), or you can ask 
 // ikcp_check when to call it again (without ikcp_input/_send calling).
 // 'current' - current timestamp in millisec. 
-void ikcp_update(ikcpcb *kcp, IUINT32 current);
+void ikcp_update(ikcpcb *kcp, IUINT32 current); // 时钟更新
 
 // Determine when should you invoke ikcp_update:
 // returns when you should invoke ikcp_update in millisec, if there 
@@ -373,9 +411,13 @@ void ikcp_update(ikcpcb *kcp, IUINT32 current);
 IUINT32 ikcp_check(const ikcpcb *kcp, IUINT32 current);
 
 // when you received a low level packet (eg. UDP packet), call it
+// ikcp_input 读取下层协议输入数据, 解析报文段; 
+// 如果是数据, 就将数据放入接收缓冲区; 
+// 如果是 ACK, 就在发送缓冲区中标记对应的报文段为已送达;
 int ikcp_input(ikcpcb *kcp, const char *data, long size);
 
 // flush pending data
+// ikcp_flush 调用输出回调将发送缓冲区中的数据发送出去.
 void ikcp_flush(ikcpcb *kcp);
 
 // check the size of next message in the recv queue
