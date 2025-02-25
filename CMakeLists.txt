@@ -4,7 +4,7 @@ project(kcp LANGUAGES C)
 
 include(CTest)
 include(GNUInstallDirs)
-
+set(CMAKE_BUILD_TYPE Debug)
 cmake_policy(SET CMP0054 NEW)
 
 if(BUILD_SHARED_LIBS AND WIN32)
@@ -59,4 +59,7 @@ if(BUILD_TESTING)
     if(MSVC AND NOT (MSVC_VERSION LESS 1900))
         target_compile_options(kcp_test PRIVATE /utf-8)
     endif()
+
+    add_executable(kcp_basic kcp_basic.c)
+    target_link_libraries(kcp_basic PRIVATE kcp)
 endif()

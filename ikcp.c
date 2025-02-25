@@ -253,7 +253,7 @@ ikcpcb* ikcp_create(IUINT32 conv, void *user)
 	kcp->mtu = IKCP_MTU_DEF;
 	kcp->mss = kcp->mtu - IKCP_OVERHEAD;
 	kcp->stream = 0;
-
+	// (1400+24)*3
 	kcp->buffer = (char*)ikcp_malloc((kcp->mtu + IKCP_OVERHEAD) * 3);
 	if (kcp->buffer == NULL) {
 		ikcp_free(kcp);
@@ -505,33 +505,40 @@ int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 			return sent;
 		}
 	}
-
+	// 是否需要分片，计算需要发送包的个数
 	if (len <= (int)kcp->mss) count = 1;
 	else count = (len + kcp->mss - 1) / kcp->mss;
-
+	// 超过窗口上限
 	if (count >= (int)IKCP_WND_RCV) {
 		if (kcp->stream != 0 && sent > 0) 
 			return sent;
 		return -2;
 	}
-
+	// 至少要发一个包？
 	if (count == 0) count = 1;
 
 	// fragment
+	// 分片操作
 	for (i = 0; i < count; i++) {
+		// 当前片的大小
 		int size = len > (int)kcp->mss ? (int)kcp->mss : len;
+		// 创建分片
 		seg = ikcp_segment_new(kcp, size);
 		assert(seg);
 		if (seg == NULL) {
 			return -2;
 		}
+		// 将数据拷贝到分片中
 		if (buffer && len > 0) {
 			memcpy(seg->data, buffer, size);
 		}
+		// 这个分片后面还会有几个片？
 		seg->len = size;
 		seg->frg = (kcp->stream == 0)? (count - i - 1) : 0;
+		// 将当前片插入到kcp的待发送队列
 		iqueue_init(&seg->node);
 		iqueue_add_tail(&seg->node, &kcp->snd_queue);
+		// 更新长度
 		kcp->nsnd_que++;
 		if (buffer) {
 			buffer += size;
@@ -539,7 +546,7 @@ int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 		len -= size;
 		sent += size;
 	}
-
+	// 返回成功发送的字节数
 	return sent;
 }
 
@@ -910,17 +917,18 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 //---------------------------------------------------------------------
 // ikcp_encode_seg
 //---------------------------------------------------------------------
+// 协议头一共24字节
 static char *ikcp_encode_seg(char *ptr, const IKCPSEG *seg)
 {
-	ptr = ikcp_encode32u(ptr, seg->conv);
-	ptr = ikcp_encode8u(ptr, (IUINT8)seg->cmd);
-	ptr = ikcp_encode8u(ptr, (IUINT8)seg->frg);
-	ptr = ikcp_encode16u(ptr, (IUINT16)seg->wnd);
-	ptr = ikcp_encode32u(ptr, seg->ts);
-	ptr = ikcp_encode32u(ptr, seg->sn);
-	ptr = ikcp_encode32u(ptr, seg->una);
-	ptr = ikcp_encode32u(ptr, seg->len);
-	return ptr;
+	ptr = ikcp_encode32u(ptr, seg->conv);			// 会话编号，   4bytes
+	ptr = ikcp_encode8u(ptr, (IUINT8)seg->cmd);		// 指令类型，   1byte
+	ptr = ikcp_encode8u(ptr, (IUINT8)seg->frg);		// 分片号，     1byte
+	ptr = ikcp_encode16u(ptr, (IUINT16)seg->wnd);	// 窗口大小，   2byte
+	ptr = ikcp_encode32u(ptr, seg->ts);				// 时间戳，     4byte
+	ptr = ikcp_encode32u(ptr, seg->sn);				// 序号，	    4byte
+	ptr = ikcp_encode32u(ptr, seg->una);			// 未确认的序号，4byte
+	ptr = ikcp_encode32u(ptr, seg->len);            // 数据长度，   4byte
+	return ptr;										//            24byte
 }
 
 static int ikcp_wnd_unused(const ikcpcb *kcp)
@@ -1150,6 +1158,7 @@ void ikcp_flush(ikcpcb *kcp)
 // ikcp_check when to call it again (without ikcp_input/_send calling).
 // 'current' - current timestamp in millisec. 
 //---------------------------------------------------------------------
+// 
 void ikcp_update(ikcpcb *kcp, IUINT32 current)
 {
 	IINT32 slap;
