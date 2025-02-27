@@ -6,7 +6,9 @@ include(CTest)
 include(GNUInstallDirs)
 set(CMAKE_BUILD_TYPE Debug)
 cmake_policy(SET CMP0054 NEW)
-
+if(MSVC)
+    add_compile_options(/wd4819)  # 禁用警告 C4819
+endif()
 if(BUILD_SHARED_LIBS AND WIN32)
     set(exports_def_file "${CMAKE_CURRENT_BINARY_DIR}/exports.def")
     set(exports_def_contents

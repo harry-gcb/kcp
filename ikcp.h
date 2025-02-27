@@ -307,7 +307,7 @@ struct IKCPSEG
 	IUINT32 resendts;		// 重传时间戳，超过这个时间重发这个包
 	IUINT32 rto;			// 该报文的 RTO，重传的超时时间 (retransmission timeout)
 	IUINT32 fastack;		// ACK 失序次数. 也就是 KCP Readme 中所说的 “跳过” 次数.
-	IUINT32 xmit;			// 已经发送的次数
+	IUINT32 xmit;			// 该报文已经发送的次数
 	char data[1];			// 数据段
 };
 
@@ -330,15 +330,18 @@ struct IKCPCB
 	IUINT32 ssthresh;	// 拥堵窗口的阈值，用来控制增长速度，满启动阈值
 	IINT32 rx_rttval;	// 平滑网络抖动时间
 	IINT32 rx_srtt;		// 平滑往返时间
-	IINT32 rx_rto, rx_minrto;
-	IUINT32 snd_wnd, rcv_wnd, rmt_wnd, cwnd, probe;
+	IINT32 rx_rto;		//  Retransmission TimeOut(RTO), 超时重传时间.
+	IINT32 rx_minrto;
+	IUINT32 snd_wnd, rcv_wnd;
+	IUINT32 rmt_wnd;	// 对端剩余接收窗口的大小
+	IUINT32 cwnd, probe;
 	IUINT32 current, interval, ts_flush, xmit;
 	IUINT32 nrcv_buf;	// 记录接收消息缓冲区长度，rcv_buf
 	IUINT32 nsnd_buf;	// 记录发送消息缓冲区长度，snd_buf
 	IUINT32 nrcv_que;	// 记录接收队列长度，rcv_queue
 	IUINT32 nsnd_que;	// 记录发送队列长度，snd_queue
 	IUINT32 nodelay, updated;
-	IUINT32 ts_probe, probe_wait;
+	IUINT32 ts_probe, probe_wait;	// 确定何时需要发送窗口询问报文.
 	IUINT32 dead_link, incr;
 	struct IQUEUEHEAD snd_queue;	// 发送消息队列
 	struct IQUEUEHEAD rcv_queue;	// 接收消息队列
