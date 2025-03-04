@@ -355,6 +355,7 @@ void ikcp_setoutput(ikcpcb *kcp, int (*output)(const char *buf, int len,
 //---------------------------------------------------------------------
 // user/upper level recv: returns size, returns below zero for EAGAIN
 //---------------------------------------------------------------------
+// 接收方调用 ikcp_recv 从 rcv_queue 中读取数据.
 int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 {
 	struct IQUEUEHEAD *p;
@@ -368,12 +369,12 @@ int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 		return -1;
 
 	if (len < 0) len = -len;
-
+	// rcv_queue 中第一个包的大小. 这需要考虑到分片
 	peeksize = ikcp_peeksize(kcp);
 
 	if (peeksize < 0) 
 		return -2;
-
+	// 外部给的内存不足以放下数据包
 	if (peeksize > len) 
 		return -3;
 
@@ -381,11 +382,12 @@ int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 		recover = 1;
 
 	// merge fragment
+	// 从 rcv_queue 取出报文读入 buffer
 	for (len = 0, p = kcp->rcv_queue.next; p != &kcp->rcv_queue; ) {
 		int fragment;
 		seg = iqueue_entry(p, IKCPSEG, node);
 		p = p->next;
-
+		// 复制到 buffer 中
 		if (buffer) {
 			memcpy(buffer, seg->data, seg->len);
 			buffer += seg->len;
@@ -397,7 +399,7 @@ int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 		if (ikcp_canlog(kcp, IKCP_LOG_RECV)) {
 			ikcp_log(kcp, IKCP_LOG_RECV, "recv sn=%lu", (unsigned long)seg->sn);
 		}
-
+		// 如果 len 小于 0, 则不消耗 rcv_queue
 		if (ispeek == 0) {
 			iqueue_del(&seg->node);
 			ikcp_segment_delete(kcp, seg);
@@ -411,8 +413,10 @@ int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 	assert(len == peeksize);
 
 	// move available data from rcv_buf -> rcv_queue
+	// // rcv_queue 空些了, 再尝试从 rcv_buf 中取些报文到 rcv_queue
 	while (! iqueue_is_empty(&kcp->rcv_buf)) {
 		seg = iqueue_entry(kcp->rcv_buf.next, IKCPSEG, node);
+		// 与 ikcp_parse_data 中相同
 		if (seg->sn == kcp->rcv_nxt && kcp->nrcv_que < kcp->rcv_wnd) {
 			iqueue_del(&seg->node);
 			kcp->nrcv_buf--;
@@ -425,6 +429,7 @@ int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 	}
 
 	// fast recover
+	// 快速recover
 	if (kcp->nrcv_que < kcp->rcv_wnd && recover) {
 		// ready to send back IKCP_CMD_WINS in ikcp_flush
 		// tell remote my window size
@@ -581,7 +586,9 @@ static void ikcp_shrink_buf(ikcpcb *kcp)
 		kcp->snd_una = kcp->snd_nxt;
 	}
 }
-
+// 对于 ACK, 会调用 ikcp_parse_ack 将对应已送达的报文从 snd_buf 中删除. 
+// 删除之后, 之后的 ikcp_flush 调用中自然不用考虑重传问题了. 
+// ikcp_parse_una 的做法与之类似
 static void ikcp_parse_ack(ikcpcb *kcp, IUINT32 sn)
 {
 	struct IQUEUEHEAD *p, *next;
@@ -592,6 +599,7 @@ static void ikcp_parse_ack(ikcpcb *kcp, IUINT32 sn)
 	for (p = kcp->snd_buf.next; p != &kcp->snd_buf; p = next) {
 		IKCPSEG *seg = iqueue_entry(p, IKCPSEG, node);
 		next = p->next;
+		// 找到对应编号的报文, 将它删除
 		if (sn == seg->sn) {
 			iqueue_del(p);
 			ikcp_segment_delete(kcp, seg);
@@ -694,35 +702,42 @@ static void ikcp_ack_get(const ikcpcb *kcp, int p, IUINT32 *sn, IUINT32 *ts)
 //---------------------------------------------------------------------
 // parse data
 //---------------------------------------------------------------------
+// 对于数据报文, 则调用 ikcp_parse_data 将其插入 rcv_buf, 
+// 然后会尽可能地将顺序正确的报文移入 rcv_queue
 void ikcp_parse_data(ikcpcb *kcp, IKCPSEG *newseg)
 {
 	struct IQUEUEHEAD *p, *prev;
 	IUINT32 sn = newseg->sn;
 	int repeat = 0;
-	
+	// 如果接收到数据报文的编号大于 rcv_nxt + rcv_wnd 或小于 rcv_nxt, 这个报文就会被丢弃
 	if (_itimediff(sn, kcp->rcv_nxt + kcp->rcv_wnd) >= 0 ||
 		_itimediff(sn, kcp->rcv_nxt) < 0) {
 		ikcp_segment_delete(kcp, newseg);
 		return;
 	}
-
+	// 在 rcv_buf 中寻找一个合适的位置以便插入
+	// 从后往前遍历
 	for (p = kcp->rcv_buf.prev; p != &kcp->rcv_buf; p = prev) {
 		IKCPSEG *seg = iqueue_entry(p, IKCPSEG, node);
 		prev = p->prev;
+		// 如果遇到编号相等的, 则是重复报文
 		if (seg->sn == sn) {
 			repeat = 1;
 			break;
 		}
+		// // 找到第一个编号比它小的
 		if (_itimediff(sn, seg->sn) > 0) {
 			break;
 		}
 	}
-
+	
 	if (repeat == 0) {
+		// 插入
 		iqueue_init(&newseg->node);
 		iqueue_add(&newseg->node, p);
 		kcp->nrcv_buf++;
 	}	else {
+		// 重复报文直接丢弃
 		ikcp_segment_delete(kcp, newseg);
 	}
 
@@ -732,8 +747,12 @@ void ikcp_parse_data(ikcpcb *kcp, IKCPSEG *newseg)
 #endif
 
 	// move available data from rcv_buf -> rcv_queue
+	// // rcv_nxt 尝试向后移动, 将顺序正确的报文移动到 rcv_queue 中
 	while (! iqueue_is_empty(&kcp->rcv_buf)) {
 		IKCPSEG *seg = iqueue_entry(kcp->rcv_buf.next, IKCPSEG, node);
+		// 保证接收窗口大小不小于 0
+		// 第一个条件：保证顺序接收下一个包（从rcv_buf）
+		// 第二个条件：接收窗口留有空间接收下一包（从input）
 		if (seg->sn == kcp->rcv_nxt && kcp->nrcv_que < kcp->rcv_wnd) {
 			iqueue_del(&seg->node);
 			kcp->nrcv_buf--;
@@ -763,24 +782,26 @@ void ikcp_parse_data(ikcpcb *kcp, IKCPSEG *newseg)
 // 解析收到的数据
 int ikcp_input(ikcpcb *kcp, const char *data, long size)
 {
+	// 收到报文后, snd_una 可能会向右移动. 这里保存移动前的 snd_una
 	IUINT32 prev_una = kcp->snd_una;
 	IUINT32 maxack = 0, latest_ts = 0;
 	int flag = 0;
-
+	// 是否打印输入log
 	if (ikcp_canlog(kcp, IKCP_LOG_INPUT)) {
 		ikcp_log(kcp, IKCP_LOG_INPUT, "[RI] %d bytes", (int)size);
 	}
-
+	// 检查数据是否正常
 	if (data == NULL || (int)size < (int)IKCP_OVERHEAD) return -1;
 
 	while (1) {
+		// 报文的各个字段
 		IUINT32 ts, sn, len, una, conv;
 		IUINT16 wnd;
 		IUINT8 cmd, frg;
 		IKCPSEG *seg;
 
 		if (size < (int)IKCP_OVERHEAD) break;
-
+		// 解包，为各个字段赋值
 		data = ikcp_decode32u(data, &conv);
 		if (conv != kcp->conv) return -1;
 
@@ -793,23 +814,25 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 		data = ikcp_decode32u(data, &len);
 
 		size -= IKCP_OVERHEAD;
-
+		// 检查剩下的数据是否足够解析
 		if ((long)size < (long)len || (int)len < 0) return -2;
-
+		// 检查cmd类型
 		if (cmd != IKCP_CMD_PUSH && cmd != IKCP_CMD_ACK &&
 			cmd != IKCP_CMD_WASK && cmd != IKCP_CMD_WINS) 
 			return -3;
-		// 所有的报文都有 una 字段, 根据 una 将相应的报文标记为已送达;
-		kcp->rmt_wnd = wnd;
-		ikcp_parse_una(kcp, una);
-		ikcp_shrink_buf(kcp);
+		
+		kcp->rmt_wnd = wnd;			// 更新 rmt_wnd
+		ikcp_parse_una(kcp, una);	// 所有的报文都有 una 字段, 根据 una 将相应的报文标记为已送达;
+		ikcp_shrink_buf(kcp);		// 尝试向右移动 snd_una
 		// 如果是 ACK 报文, 就将相应的报文标记为已送达;
 		if (cmd == IKCP_CMD_ACK) {
 			if (_itimediff(kcp->current, ts) >= 0) {
+				// 这里计算 RTO, _itimediff(kcp->current, ts) 便是 RTT.
 				ikcp_update_ack(kcp, _itimediff(kcp->current, ts));
 			}
-			ikcp_parse_ack(kcp, sn);
-			ikcp_shrink_buf(kcp);
+			ikcp_parse_ack(kcp, sn);	// 将已确认送达的报文 snd_buf 中删除.
+			ikcp_shrink_buf(kcp);		// 尝试向右移动 snd_una
+			// // 这里计算出这次 input 得到的最大 ACK 编号
 			if (flag == 0) {
 				flag = 1;
 				maxack = sn;
@@ -841,7 +864,9 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 				ikcp_log(kcp, IKCP_LOG_IN_DATA, 
 					"input psh: sn=%lu ts=%lu", (unsigned long)sn, (unsigned long)ts);
 			}
+			// 这个报文在接收窗口之内
 			if (_itimediff(sn, kcp->rcv_nxt + kcp->rcv_wnd) < 0) {
+				// 将相关信息 (报文编号和时间戳) 插入 ACK 列表中
 				ikcp_ack_push(kcp, sn, ts);
 				if (_itimediff(sn, kcp->rcv_nxt) >= 0) {
 					seg = ikcp_segment_new(kcp, len);
@@ -857,7 +882,7 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 					if (len > 0) {
 						memcpy(seg->data, data, len);
 					}
-
+					// 将数据插入rcv_buf
 					ikcp_parse_data(kcp, seg);
 				}
 			}
@@ -873,6 +898,7 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 			}
 		}
 		else if (cmd == IKCP_CMD_WINS) {
+			// 什么都不用做, wnd 字段前面已经取得了
 			// do nothing
 			if (ikcp_canlog(kcp, IKCP_LOG_IN_WINS)) {
 				ikcp_log(kcp, IKCP_LOG_IN_WINS,
@@ -886,11 +912,11 @@ int ikcp_input(ikcpcb *kcp, const char *data, long size)
 		data += len;
 		size -= len;
 	}
-
+	// 检查 snd_buf 中编号小于 maxack 且未确认送达的报文, 将其 fastack 加一
 	if (flag != 0) {
 		ikcp_parse_fastack(kcp, maxack, latest_ts);
 	}
-
+	// 计算cwnd
 	if (_itimediff(kcp->snd_una, prev_una) > 0) {
 		if (kcp->cwnd < kcp->rmt_wnd) {
 			IUINT32 mss = kcp->mss;

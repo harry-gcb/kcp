@@ -322,7 +322,7 @@ struct IKCPCB
 	IUINT32 mtu;  		// 最大传输单元
 	IUINT32 mss;  		// 最大分片大小, mtu-24
 	IUINT32 state; 		// 连接状态(0xFFFFFFFF表示断开连接)
-	IUINT32 snd_una;	// 第一个未确认的包
+	IUINT32 snd_una;	// 发送缓冲区中最小还未确认送达的报文段的编号. 也就是说, 编号比它小的报文段都已确认送达.
 	IUINT32 snd_nxt;	// 待发送包的序号 
 	IUINT32 rcv_nxt;	// 待接受包的序号，待接收消息尾序号(rcv_nxt+rcv_wnd)
 	IUINT32 ts_recent;	// 
@@ -332,7 +332,8 @@ struct IKCPCB
 	IINT32 rx_srtt;		// 平滑往返时间
 	IINT32 rx_rto;		//  Retransmission TimeOut(RTO), 超时重传时间.
 	IINT32 rx_minrto;
-	IUINT32 snd_wnd, rcv_wnd;
+	IUINT32 snd_wnd;	// 发送窗口大小
+	IUINT32 rcv_wnd;	// 接收窗口大小
 	IUINT32 rmt_wnd;	// 对端剩余接收窗口的大小
 	IUINT32 cwnd, probe;
 	IUINT32 current, interval, ts_flush, xmit;
